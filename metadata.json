@@ -1,0 +1,6 @@
+{
+  "name": "Libra",
+  "description": "Asisten Rekomendasi Buku Perpustakaan Kampus menggunakan Content-Based Filtering dan Cosine Similarity",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

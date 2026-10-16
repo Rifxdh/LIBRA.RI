@@ -1,0 +1,51 @@
+query_id,query_id_text,query_en,relevant_ids
+1,buku pemrograman python dasar dan lanjutan,introductory and advanced python programming books,0448165686;1575000369;0345276906;1565921976
+2,algoritma dan struktur data dalam ilmu komputer,algorithms and data structures in computer science,0380007959;0262031418;0385247958;0130843709
+3,pembelajaran mesin dan kecerdasan buatan,machine learning and artificial intelligence,0312784201;0439309085;0671504371;1565921976
+4,rekayasa perangkat lunak dan arsitektur sistem,software engineering and system architecture,0140022651;0590453882;0806957905;2277301043
+5,sistem manajemen basis data relasional dan sql,relational database management systems and sql,020154329X;0393322203;0586020926;0451118545
+6,jaringan komputer dan protokol komunikasi,computer networks and communication protocols,0590406914;0465007805;0140320865;0471128457
+7,keamanan siber dan kriptografi modern,cybersecurity and modern cryptography,0471128457;0679600590;0679601716;0375752161
+8,komputasi awan dan sistem terdistribusi,cloud computing and distributed systems,0590406914;0140320865;0465007805;0590326368
+9,pengembangan aplikasi web modern,modern web application development,156496518X;0312979509;0441878792;0446364797
+10,pemrograman aplikasi bergerak android,android mobile application programming,0590997300;0345404475;0345350472;0375707093
+11,metodologi penelitian kuantitatif dan kualitatif,quantitative and qualitative research methodology,0553563467;0070191727;0312988990;0786904933
+12,analisis data statistik terapan dan spss,applied statistical data analysis and spss,0070314292;0716736276;0471898503;0789449218
+13,matematika diskrit dan teori graf,discrete mathematics and graph theory,0671024582;055357356X;0441833446;0821772066
+14,aljabar linear dan matriks untuk komputasi,linear algebra and matrices for computing,0671024582;055357356X;0441833446;0821772066
+15,kalkulus diferensial dan integral tingkat lanjut,advanced differential and integral calculus,0345320654;0534385354;0345460367;0471627348
+16,probabilitas dan proses stokastik,probability and stochastic processes,0446345075;0201422891;0312023308
+17,manajemen strategis dan kepemimpinan bisnis,strategic management and business leadership,0887306985;1570621799;0870946595;0517703491
+18,analisis laporan keuangan dan akuntansi,financial statement analysis and accounting,0380016761;0324025424;0141180757;0373055579
+19,pemasaran digital dan perilaku konsumen,digital marketing and consumer behavior,0890439257;0375405046;089879854X;038549503X
+20,kewirausahaan dan pengembangan bisnis rintisan,entrepreneurship and startup business development,0395711339;0767906047;0307155110;1570621799
+21,manajemen rantai pasok dan logistik global,supply chain management and global logistics,0836217578;0886876370;0590471511;0380017792
+22,etika bisnis dan tata kelola perusahaan,business ethics and corporate governance,1550130536;0590692135;0137982151;0130179620
+23,interaksi manusia dan komputer serta desain ux,human computer interaction and ux design,076790012X;0590406914;0465007805;0130843709
+24,pengolahan citra digital dan visi komputer,digital image processing and computer vision,http://images.amazon.com/images/P/0345348036.01.THUMBZZZ.jpg;3453063708;0743427505;0440224772
+25,pemrosesan bahasa alami dan penambangan teks,natural language processing and text mining,0843134909;091656701X;0789415488;0140252673
+26,sistem temu kembali informasi dan mesin pencari,information retrieval systems and search engines,0373614896;0866223622;1578591201;0316328197
+27,teknologi internet of things dan sensor cerdas,internet of things and smart sensor technology,0965866807;0060170441;1557041113;1552975649
+28,robotika dan sistem kendali otomatis,robotics and automated control systems,8435020010;0345315715;0552144789;0671793136
+29,arsitektur komputer dan sistem operasi,computer architecture and operating systems,0590406914;0671892495;0140320865;0465007805
+30,desain antarmuka pengguna ui dan wireframe,user interface ui design and wireframing,0131939882;0138795290;0553572407;0449005569
+31,psikologi pendidikan dan perkembangan anak,educational psychology and child development,1401300014;0060406046;0201484021;1565049314
+32,sosiologi perkotaan dan dinamika masyarakat,urban sociology and societal dynamics,1582340986;0385065299;0205319149;0140511849
+33,komunikasi massa dan media penyiaran,mass communication and broadcast media,1583225498;155071063X;0553211803;0553109480
+34,hukum bisnis dan kekayaan intelektual,business law and intellectual property,038550408X;0440210038;1570427003;0743245024
+35,sejarah peradaban nusantara dan arkeologi,history of archipelago civilization and archeology,0060007761;0139638857;0060803452;0195215192
+36,filsafat ilmu dan epistemologi modern,philosophy of science and modern epistemology,0136639488;0060901918;0534566588;1858817900
+37,biografi tokoh sains dan penemu dunia,biographies of world scientists and inventors,0877852413;1579730175;0140044531;0306808900
+38,manajemen sumber daya manusia dan talenta,human resource management and talent development,0671730797;055328424X;0375405119;0671019651
+39,literasi informasi dan manajemen perpustakaan digital,information literacy and digital library management,0671847163;0395437482;0590739883;002021782X
+40,ekonometrika dan pemodelan ekonomi makro,econometrics and macroeconomic modeling,1580170358;0515062936;1564584933;185828869X
+41,manajemen risiko investasi dan portofolio,investment risk management and portfolio theory,0843940697;0028629558;155591330X;0155019872
+42,buku novel fiksi ilmiah cyberpunk futuristik,futuristic cyberpunk science fiction novels,0064634574;067177879X;050552435X;0425072118
+43,novel fantasi epik dan petualangan sihir,epic fantasy and magical adventure novels,0312851065;0575041471;0312855486;0786001445
+44,novel misteri pembunuhan dan detektif,murder mystery and detective investigation novels,0312962606;0517037505;0806511575;0671879529
+45,novel sejarah fiksi berlatar perang dunia,historical fiction novels set during world war,0866118705;0449308375;0425050750;0590687158
+46,sastra klasik dunia dan puisi pilihan,world classic literature and selected poetry,0140585400;0743200330;0679741151;0517606100
+47,buku psikologi kebiasaan dan pengembangan diri,psychology of habits and self improvement books,0867205113;leisure;0201034646;0809424045
+48,panduan produktivitas dan manajemen waktu,productivity guides and time management,0140294058;0835910563;0028629558;0670690929
+49,inovasi pendidikan dan pembelajaran daring,educational innovation and online learning,1586609270;0891347739;0688160999;1400303214
+50,keberlanjutan lingkungan dan energi terbarukan,environmental sustainability and renewable energy,0688156266;0916571033;0195018249;0517706229
