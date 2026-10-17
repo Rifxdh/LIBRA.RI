@@ -138,7 +138,7 @@ function cleanBookDataset(source: Book[]): { books: Book[]; duplicates: number; 
 
     const sourceAuthorIdentity = normalizeBookIdentity(sourceAuthor);
     const authorMissing = !sourceAuthorIdentity
-      || ['unknown', 'anonymous', 'anonim', 'n a', 'na', 'none', 'null'].includes(sourceAuthorIdentity);
+      || ['unknown', 'anonymous', 'anonim', 'tidak diketahui', 'n a', 'na', 'none', 'null'].includes(sourceAuthorIdentity);
     const penulis = authorMissing ? recoverBookAuthor(judul, sourceBook.isbn) : sourceAuthor;
     const normalizedAuthor = normalizeBookIdentity(penulis);
     const kategori = cleanBookText(sourceBook.kategori).replace(/^\[['"]?(.+?)['"]?\]$/, '$1').trim();
