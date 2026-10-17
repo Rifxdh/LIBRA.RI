@@ -304,7 +304,10 @@ if (BOOKS_COLLECTION.length === 0) BOOKS_COLLECTION = [...BOOKS_DATABASE];
 
 const startupCleanResult = cleanBookDataset(BOOKS_COLLECTION);
 BOOKS_COLLECTION = startupCleanResult.books;
-if (startupCleanResult.duplicates || startupCleanResult.invalid || startupCleanResult.capped || startupCleanResult.invalidCategories) {
+if (
+  !process.env.VERCEL &&
+  (startupCleanResult.duplicates || startupCleanResult.invalid || startupCleanResult.capped || startupCleanResult.invalidCategories)
+) {
   const temporaryPath = `${STORE_PATH}.tmp`;
   fs.writeFileSync(temporaryPath, JSON.stringify(BOOKS_COLLECTION), 'utf8');
   fs.renameSync(temporaryPath, STORE_PATH);
@@ -403,13 +406,20 @@ function getGeminiClient(): GoogleGenAI | null {
   return aiClient;
 }
 
-async function startServer() {
+async function createApp() {
   const app = express();
-  const PORT = Number.parseInt(process.env.PORT || '3000', 10);
 
   // Middleware for JSON parsing with high limit for massive datasets (e.g. 450 MB Kaggle CSVs)
   app.use(express.json({ limit: '500mb' }));
   app.use(express.urlencoded({ limit: '500mb', extended: true }));
+  app.use('/api/books', (req: Request, res: Response, next) => {
+    const persistentWriteRoutes = ['/clean', '/import', '/import-csv', '/import-csv-chunk', '/reset'];
+    if (process.env.VERCEL && req.method === 'POST' && persistentWriteRoutes.includes(req.path)) {
+      res.status(501).json({ error: 'Catalog updates are disabled on Vercel because function storage is ephemeral.' });
+      return;
+    }
+    next();
+  });
 
   // API 1: Health status
   app.get('/api/health', (req: Request, res: Response) => {
@@ -972,15 +982,15 @@ Namun, Anda bisa mencoba mencari dengan kata kunci genre fiksi seperti **Fantasy
     }
   });
 
-  // Vite development integration
-  if (process.env.NODE_ENV !== 'production') {
+  // Vite development integration. Vercel serves the built `dist` directory via its CDN.
+  if (!process.env.VERCEL && process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
     console.log('Vite middleware mounted for development.');
-  } else {
+  } else if (!process.env.VERCEL) {
     // Serve production static files in dist
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
@@ -990,9 +1000,24 @@ Namun, Anda bisa mencoba mencari dengan kata kunci genre fiksi seperti **Fantasy
     console.log('Serving production static files from dist.');
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Libra backend running on port ${PORT}`);
-  });
+  return app;
 }
 
-startServer();
+const appPromise = createApp();
+
+export default async function handler(req: Request, res: Response) {
+  const app = await appPromise;
+  app(req, res);
+}
+
+if (!process.env.VERCEL) {
+  appPromise.then((app) => {
+    const port = Number.parseInt(process.env.PORT || '3000', 10);
+    app.listen(port, '0.0.0.0', () => {
+      console.log(`Libra backend running on port ${port}`);
+    });
+  }).catch((error) => {
+    console.error('Failed to initialize Libra server:', error);
+    process.exitCode = 1;
+  });
+}
