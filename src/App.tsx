@@ -53,6 +53,9 @@ export default function App() {
   const [recommendations, setRecommendations] = useState<RecommendationExtended[]>([]);
   const [allBooks, setAllBooks] = useState<Book[]>([]);
   const [savedBookIds, setSavedBookIds] = useState<number[]>([]);
+  const [bookmarkedBooks, setBookmarkedBooks] = useState<Book[]>([]);
+  const [catalogTotal, setCatalogTotal] = useState(0);
+  const [categoryCounts, setCategoryCounts] = useState<Record<string, number>>({});
   
   // UI States
   const [chatStarted, setChatStarted] = useState(false);
@@ -69,6 +72,7 @@ export default function App() {
   // Large Dataset Catalog Pagination & Search States
   const [catalogSearch, setCatalogSearch] = useState('');
   const [catalogPage, setCatalogPage] = useState(1);
+  const [catalogRefreshKey, setCatalogRefreshKey] = useState(0);
   const [showKaggleGuide, setShowKaggleGuide] = useState(false);
   const [isCopiedPython, setIsCopiedPython] = useState(false);
   const itemsPerPage = 12;
@@ -76,29 +80,98 @@ export default function App() {
   // Ref for auto scrolling chat
   const chatEndRef = useRef<HTMLDivElement>(null);
 
-  // Load books catalog and local storage saved books on mount
+  // Load only the current catalog page so large datasets do not overwhelm the browser.
   useEffect(() => {
-    fetch('/api/books')
-      .then((res) => res.json())
-      .then((data) => setAllBooks(data))
-      .catch((err) => {
-        console.error('Failed to load catalog:', err);
-        // Fallback to static client data in case server is not ready
-        import('./data/books.ts').then((mod) => {
-          setAllBooks(mod.BOOKS_DATABASE);
-        });
+    const controller = new AbortController();
+    const searchTimer = window.setTimeout(() => {
+      const params = new URLSearchParams({
+        page: String(catalogPage),
+        limit: String(itemsPerPage),
+        search: catalogSearch.trim(),
+        category: selectedCategory,
       });
 
-    // Populate bookmarks from localStorage
+      fetch(`/api/books?${params}`, { signal: controller.signal })
+        .then((res) => {
+          if (!res.ok) throw new Error(`Catalog request failed (HTTP ${res.status})`);
+          return res.json();
+        })
+        .then((data) => {
+          setAllBooks(data.books);
+          setCatalogTotal(data.total);
+          setCatalogPage(data.page);
+          setCategoryCounts(data.categoryCounts);
+        })
+        .catch((err) => {
+          if (err.name === 'AbortError') return;
+          console.error('Failed to load catalog:', err);
+          import('./data/books.ts').then((mod) => {
+            const fallbackBooks = mod.BOOKS_DATABASE;
+            const normalizedSearch = catalogSearch.trim().toLocaleLowerCase();
+            const filteredBooks = fallbackBooks.filter((book) =>
+              (selectedCategory === 'Semua' || book.kategori === selectedCategory) &&
+              (!normalizedSearch || [
+                book.judul, book.penulis, book.penerbit, book.isbn, book.genre || '', book.sinopsis,
+              ].some((value) => value.toLocaleLowerCase().includes(normalizedSearch)))
+            );
+            setAllBooks(filteredBooks.slice((catalogPage - 1) * itemsPerPage, catalogPage * itemsPerPage));
+            setCatalogTotal(filteredBooks.length);
+            setCategoryCounts(fallbackBooks.reduce<Record<string, number>>((counts, book) => {
+              counts[book.kategori] = (counts[book.kategori] || 0) + 1;
+              return counts;
+            }, {}));
+          });
+        });
+    }, catalogSearch ? 250 : 0);
+
+    return () => {
+      window.clearTimeout(searchTimer);
+      controller.abort();
+    };
+  }, [catalogPage, catalogSearch, catalogRefreshKey, selectedCategory]);
+
+  useEffect(() => {
     try {
       const saved = localStorage.getItem('ruang_aksara_saved');
       if (saved) {
-        setSavedBookIds(JSON.parse(saved));
+        const parsed: unknown = JSON.parse(saved);
+        if (!Array.isArray(parsed) || !parsed.every((id) => Number.isSafeInteger(id))) {
+          throw new Error('Saved bookmarks must be an array of integer book IDs.');
+        }
+        setSavedBookIds(parsed);
       }
     } catch (e) {
       console.error('Failed to parse localStorage bookmarks', e);
     }
   }, []);
+
+  useEffect(() => {
+    if (savedBookIds.length === 0) {
+      setBookmarkedBooks([]);
+      return;
+    }
+
+    const controller = new AbortController();
+    fetch('/api/books/lookup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: savedBookIds }),
+      signal: controller.signal,
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error(`Bookmark lookup failed (HTTP ${res.status})`);
+        return res.json();
+      })
+      .then((data) => setBookmarkedBooks(data.books))
+      .catch((error) => {
+        if (error.name !== 'AbortError') {
+          console.error('Failed to load saved books:', error);
+          setBookmarkedBooks([]);
+        }
+      });
+
+    return () => controller.abort();
+  }, [savedBookIds]);
 
   // Sync saved bookmarks with Local Storage
   const toggleBookmark = (id: number) => {
@@ -109,7 +182,11 @@ export default function App() {
       updated = [...savedBookIds, id];
     }
     setSavedBookIds(updated);
-    localStorage.setItem('ruang_aksara_saved', JSON.stringify(updated));
+    try {
+      localStorage.setItem('ruang_aksara_saved', JSON.stringify(updated));
+    } catch (error) {
+      console.error('Failed to save bookmarks to localStorage:', error);
+    }
   };
 
   // Auto-scroll chat window when new message arrives
@@ -255,18 +332,6 @@ export default function App() {
     }
   ];
 
-  // Calculate book count per category for filtering top popular genres
-  const categoryCounts = useMemo(() => {
-    const counts: Record<string, number> = {};
-    allBooks.forEach((b) => {
-      const cat = b.kategori?.trim();
-      if (cat) {
-        counts[cat] = (counts[cat] || 0) + 1;
-      }
-    });
-    return counts;
-  }, [allBooks]);
-
   // Select top 5-8 popular genres that have > 10 entries (plus 'Semua')
   const categories = useMemo(() => {
     let popularCats = Object.entries(categoryCounts)
@@ -286,23 +351,8 @@ export default function App() {
     return ['Semua', ...popularCats.slice(0, 8)];
   }, [categoryCounts]);
   
-  const searchLower = catalogSearch.toLowerCase().trim();
-  const filteredBooksForCatalog = allBooks.filter((b) => {
-    const matchesCategory = selectedCategory === 'Semua' || b.kategori === selectedCategory;
-    const matchesSearch = !searchLower || 
-      b.judul.toLowerCase().includes(searchLower) ||
-      b.penulis.toLowerCase().includes(searchLower) ||
-      b.penerbit.toLowerCase().includes(searchLower) ||
-      b.isbn.toLowerCase().includes(searchLower) ||
-      (b.genre && b.genre.toLowerCase().includes(searchLower)) ||
-      b.sinopsis.toLowerCase().includes(searchLower);
-    return matchesCategory && matchesSearch;
-  });
-
-  const totalCatalogPages = Math.ceil(filteredBooksForCatalog.length / itemsPerPage) || 1;
-  const currentPaginatedBooks = filteredBooksForCatalog.slice((catalogPage - 1) * itemsPerPage, catalogPage * itemsPerPage);
-
-  const bookmarkedBooks = allBooks.filter((b) => savedBookIds.includes(b.id));
+  const totalCatalogPages = Math.ceil(catalogTotal / itemsPerPage) || 1;
+  const currentPaginatedBooks = allBooks;
 
   // Export bookmark reading list to formatted PDF document
   const handleExportPDF = () => {
@@ -582,11 +632,8 @@ export default function App() {
 
         const data = await response.json();
         if (isLast) {
-          const booksRes = await fetch('/api/books');
-          if (booksRes.ok) {
-            const updatedBooks = await booksRes.json();
-            setAllBooks(updatedBooks);
-          }
+          setCatalogPage(1);
+          setCatalogRefreshKey((key) => key + 1);
           setImportStatus({
             success: true,
             message: `Selesai! Berhasil mengimpor dan mengklasifikasikan ${data.currentTotal?.toLocaleString('id-ID') || 0} buku dari file dataset ${file.name} (${fileSizeMB.toFixed(1)} MB)!`
@@ -613,7 +660,8 @@ export default function App() {
       const response = await fetch('/api/books/reset', { method: 'POST' });
       const data = await response.json();
       if (data.success) {
-        setAllBooks(data.books);
+        setCatalogPage(1);
+        setCatalogRefreshKey((key) => key + 1);
         setImportStatus({ success: true, message: `Dataset berhasil direset ke katalog utama (${data.count} buku multi-genre terstruktur).` });
       }
     } catch (e) {
@@ -838,7 +886,7 @@ export default function App() {
                   <div className="flex items-center gap-2">
                     <Grid className="w-4 h-4 text-stone-500" />
                     <h3 className="text-xs font-bold text-stone-700 tracking-wide font-sans">
-                      Katalog ({filteredBooksForCatalog.length.toLocaleString('id-ID')})
+                      Katalog ({catalogTotal.toLocaleString('id-ID')})
                     </h3>
                   </div>
 
@@ -868,7 +916,7 @@ export default function App() {
                   {/* Category scrollable badging - Top 5-8 Popular Genres (>10 entries) */}
                   <div className="flex flex-wrap gap-1.5" id="category_scroll_p">
                     {categories.map((cat) => {
-                      const count = cat === 'Semua' ? allBooks.length : (categoryCounts[cat] || 0);
+                      const count = cat === 'Semua' ? Object.values(categoryCounts).reduce((sum, value) => sum + value, 0) : (categoryCounts[cat] || 0);
                       return (
                         <button
                           key={cat}
@@ -934,7 +982,7 @@ export default function App() {
                   ))}
                 </div>
 
-                {filteredBooksForCatalog.length === 0 && (
+                {catalogTotal === 0 && (
                   <div className="text-center py-10 bg-white border border-dashed border-stone-200 rounded-xl p-6">
                     <BookOpen className="w-7 h-7 text-stone-300 mx-auto mb-2" />
                     <p className="text-xs text-stone-600 font-medium">Tidak ada buku yang cocok</p>
@@ -951,7 +999,7 @@ export default function App() {
                 {totalCatalogPages > 1 && (
                   <div className="flex items-center justify-between mt-5 pt-3.5 border-t border-stone-200 text-xs">
                     <p className="text-stone-500 font-mono text-[11px]">
-                      {((catalogPage - 1) * itemsPerPage) + 1}–{Math.min(catalogPage * itemsPerPage, filteredBooksForCatalog.length)} dari {filteredBooksForCatalog.length.toLocaleString('id-ID')}
+                      {((catalogPage - 1) * itemsPerPage) + 1}–{Math.min(catalogPage * itemsPerPage, catalogTotal)} dari {catalogTotal.toLocaleString('id-ID')}
                     </p>
                     <div className="flex items-center gap-1.5">
                       <button
@@ -976,7 +1024,7 @@ export default function App() {
                     </div>
                   </div>
                 )}
-                {filteredBooksForCatalog.length === 0 && (
+                {catalogTotal === 0 && (
                   <div className="text-center py-10 bg-white border border-dashed border-stone-200 rounded-xl p-4">
                     <BookOpen className="w-8 h-8 text-stone-300 mx-auto mb-2.5" />
                     <p className="text-xs text-stone-500 font-semibold">Tidak ada buku dalam kategori {selectedCategory}</p>

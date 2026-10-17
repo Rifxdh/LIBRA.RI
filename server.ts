@@ -6,12 +6,13 @@
 import express, { Request, Response } from 'express';
 import path from 'path';
 import fs from 'fs';
+import { gunzipSync } from 'zlib';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI } from '@google/genai';
 import dotenv from 'dotenv';
 
-// Load environmental parameters
-dotenv.config();
+// Load local secrets first (the documented .env.local file), then shared .env.
+dotenv.config({ path: ['.env.local', '.env'] });
 
 import { BOOKS_DATABASE } from './src/data/books.ts';
 import { TFIDFRecommendationEngine } from './src/utils/nlp.ts';
@@ -20,10 +21,212 @@ import { generateLibraryDataset } from './src/data/generator.ts';
 import { db } from './src/db/index.ts';
 import { books as booksTable } from './src/db/schema.ts';
 
-// Storage file path for user-imported book datasets
+// Prefer the writable, cleaned catalog; compressed and legacy files are recovery sources.
+const DATASET_PATH = path.join(process.cwd(), 'src', 'data', 'books_store.json.gz');
+const LEGACY_DATASET_PATH = path.join(process.cwd(), 'books_store-copy.json');
 const STORE_PATH = path.join(process.cwd(), 'src', 'data', 'books_store.json');
+const MAX_CLEAN_BOOKS = 52000;
 
 let BOOKS_COLLECTION: Book[] = [];
+let categoryCountsCache: Record<string, number> | null = null;
+
+function getCategoryCounts(): Record<string, number> {
+  if (categoryCountsCache) return categoryCountsCache;
+
+  categoryCountsCache = {};
+  for (const book of BOOKS_COLLECTION) {
+    if (book.kategori) {
+      categoryCountsCache[book.kategori] = (categoryCountsCache[book.kategori] || 0) + 1;
+    }
+  }
+  return categoryCountsCache;
+}
+
+function invalidateCatalogCache() {
+  categoryCountsCache = null;
+}
+
+function cleanBookText(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  return value
+    .replace(/&amp;/gi, '&')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/^["']+|["']+$/g, '')
+    .trim();
+}
+
+function normalizeBookIdentity(value: string): string {
+  return value.normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLocaleLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function getValidIsbn(value: string): string {
+  const isbn = value.toUpperCase().replace(/[^0-9X]/g, '');
+  if (/^\d{13}$/.test(isbn)) {
+    const checksum = [...isbn.slice(0, 12)].reduce(
+      (sum, digit, index) => sum + Number(digit) * (index % 2 === 0 ? 1 : 3),
+      0,
+    );
+    return (10 - checksum % 10) % 10 === Number(isbn[12]) ? isbn : '';
+  }
+  if (/^\d{9}[\dX]$/.test(isbn)) {
+    const checksum = [...isbn].reduce(
+      (sum, digit, index) => sum + (digit === 'X' ? 10 : Number(digit)) * (10 - index),
+      0,
+    );
+    return checksum % 11 === 0 ? isbn : '';
+  }
+  return '';
+}
+
+const curatedAuthorsByIsbn = new Map(
+  BOOKS_DATABASE
+    .map((book) => [getValidIsbn(book.isbn), book.penulis] as const)
+    .filter(([isbn]) => Boolean(isbn)),
+);
+const curatedAuthorsByTitle = new Map(
+  BOOKS_DATABASE.map((book) => [normalizeBookIdentity(cleanBookText(book.judul)), book.penulis] as const),
+);
+
+function recoverBookAuthor(title: string, isbn: string): string {
+  return curatedAuthorsByIsbn.get(getValidIsbn(isbn))
+    || curatedAuthorsByTitle.get(normalizeBookIdentity(title))
+    || 'Tidak diketahui';
+}
+
+function bookQualityScore(book: Book): number {
+  return (book.penulis !== 'Tidak diketahui' ? 2 : 0)
+    + (getValidIsbn(book.isbn) ? 8 : 0)
+    + (book.sinopsis.split(/\s+/).filter(Boolean).length >= 4 ? 4 : 0)
+    + (book.penerbit ? 2 : 0)
+    + (book.kategori ? 2 : 0)
+    + (book.genre ? 1 : 0)
+    + (book.tahun > 0 ? 1 : 0)
+    + (book.halaman > 0 ? 1 : 0);
+}
+
+function cleanBookDataset(source: Book[]): { books: Book[]; duplicates: number; invalid: number; capped: number } {
+  const groups: Array<{ book: Book; score: number; keys: Set<string> } | null> = [];
+  const keyToGroup = new Map<string, number>();
+  const titleToGroups = new Map<string, number[]>();
+  let duplicates = 0;
+  let invalid = 0;
+
+  for (const [index, sourceBook] of source.entries()) {
+    const judul = cleanBookText(sourceBook.judul);
+    const sourceAuthor = cleanBookText(sourceBook.penulis);
+    const sinopsis = cleanBookText(sourceBook.sinopsis);
+    const normalizedTitle = normalizeBookIdentity(judul);
+    if (
+      normalizedTitle.length < 2 ||
+      ['unknown', 'untitled', 'untitled book', 'no title', 'n a', 'na', 'none', 'null'].includes(normalizedTitle) ||
+      sinopsis.length < 15 ||
+      sinopsis.split(/\s+/).filter(Boolean).length < 4
+    ) {
+      invalid++;
+      continue;
+    }
+
+    const sourceAuthorIdentity = normalizeBookIdentity(sourceAuthor);
+    const authorMissing = !sourceAuthorIdentity
+      || ['unknown', 'anonymous', 'anonim', 'n a', 'na', 'none', 'null'].includes(sourceAuthorIdentity);
+    const penulis = authorMissing ? recoverBookAuthor(judul, sourceBook.isbn) : sourceAuthor;
+    const normalizedAuthor = normalizeBookIdentity(penulis);
+    const kategori = cleanBookText(sourceBook.kategori).replace(/^\[['"]?(.+?)['"]?\]$/, '$1').trim();
+    const book: Book = {
+      id: Number.isSafeInteger(sourceBook.id) && sourceBook.id > 0 ? sourceBook.id : index + 1,
+      judul,
+      penulis,
+      kategori,
+      genre: cleanBookText(sourceBook.genre),
+      sinopsis,
+      tahun: Number.isInteger(sourceBook.tahun) && sourceBook.tahun >= 1450 && sourceBook.tahun <= new Date().getFullYear()
+        ? sourceBook.tahun
+        : 0,
+      isbn: cleanBookText(sourceBook.isbn),
+      halaman: Number.isInteger(sourceBook.halaman) && sourceBook.halaman > 0 ? sourceBook.halaman : 0,
+      penerbit: cleanBookText(sourceBook.penerbit),
+      gradient: sourceBook.gradient || getRandomGradient(index),
+    };
+    const titleAuthorKey = `title:${normalizedTitle}|author:${normalizedAuthor}`;
+    const validIsbn = getValidIsbn(book.isbn);
+    const keys = new Set([titleAuthorKey, ...(validIsbn ? [`isbn:${validIsbn}`] : [])]);
+    const matches = [...new Set([...keys]
+      .map((key) => keyToGroup.get(key))
+      .filter((group): group is number => group !== undefined))];
+    const sameTitleGroups = (titleToGroups.get(normalizedTitle) || [])
+      .filter((groupIndex) => groups[groupIndex] !== null);
+    if (sameTitleGroups.length === 1) {
+      const sameTitleGroup = groups[sameTitleGroups[0]]!;
+      const existingAuthorMissing = sameTitleGroup.book.penulis === 'Tidak diketahui';
+      if ((authorMissing || existingAuthorMissing) && !matches.includes(sameTitleGroups[0])) {
+        matches.push(sameTitleGroups[0]);
+      }
+    }
+
+    if (matches.length === 0) {
+      const groupIndex = groups.length;
+      groups.push({ book, score: bookQualityScore(book), keys });
+      const titleGroups = titleToGroups.get(normalizedTitle) || [];
+      titleGroups.push(groupIndex);
+      titleToGroups.set(normalizedTitle, titleGroups);
+      for (const key of keys) keyToGroup.set(key, groupIndex);
+      continue;
+    }
+
+    duplicates++;
+    const primaryIndex = matches[0];
+    const primary = groups[primaryIndex]!;
+    const score = bookQualityScore(book);
+    if (score > primary.score) {
+      primary.book = book;
+      primary.score = score;
+    }
+    for (const key of keys) {
+      primary.keys.add(key);
+      keyToGroup.set(key, primaryIndex);
+    }
+    for (const duplicateIndex of matches.slice(1)) {
+      const duplicate = groups[duplicateIndex];
+      if (!duplicate) continue;
+      if (duplicate.score > primary.score) {
+        primary.book = duplicate.book;
+        primary.score = duplicate.score;
+      }
+      for (const key of duplicate.keys) {
+        primary.keys.add(key);
+        keyToGroup.set(key, primaryIndex);
+      }
+      groups[duplicateIndex] = null;
+    }
+  }
+
+  const uniqueBooks = groups
+    .filter((group): group is NonNullable<typeof group> => group !== null)
+    .sort((left, right) => right.score - left.score)
+    .map((group) => group.book);
+  const capped = Math.max(0, uniqueBooks.length - MAX_CLEAN_BOOKS);
+  const books = uniqueBooks.slice(0, MAX_CLEAN_BOOKS);
+  const usedIds = new Set<number>();
+  let nextId = 1;
+  for (const book of books) {
+    if (usedIds.has(book.id)) {
+      while (usedIds.has(nextId)) nextId++;
+      book.id = nextId++;
+    }
+    usedIds.add(book.id);
+  }
+  return { books, duplicates, invalid, capped };
+}
 
 // Helper function to sync books collection to Cloud SQL PostgreSQL database
 async function syncBooksToCloudSQL(booksList: Book[]) {
@@ -57,35 +260,70 @@ async function syncBooksToCloudSQL(booksList: Book[]) {
   }
 }
 
-try {
-  if (fs.existsSync(STORE_PATH)) {
-    const rawData = fs.readFileSync(STORE_PATH, 'utf8');
-    BOOKS_COLLECTION = JSON.parse(rawData);
-    console.log(`Loaded ${BOOKS_COLLECTION.length} books from books_store.json`);
-  }
-} catch (e) {
-  console.error('Failed to load books_store.json, using default seed database', e);
+function isBookDataset(value: unknown): value is Book[] {
+  return Array.isArray(value) && value.every((book) =>
+    book && typeof book === 'object' &&
+    typeof book.judul === 'string' && typeof book.penulis === 'string' &&
+    typeof book.kategori === 'string' && typeof book.sinopsis === 'string'
+  );
 }
 
-// Ensure the dataset contains at least 1000 books AND includes all requested genres (e.g. Horor)
-const hasHorrorCategory = BOOKS_COLLECTION.some(b => b.kategori === 'Horor & Supernatural');
-if (BOOKS_COLLECTION.length < 1000 || !hasHorrorCategory) {
-  console.log('Dataset is outdated or lacks requested genres. Activating updated Libra dataset generator...');
+for (const datasetPath of [STORE_PATH, DATASET_PATH, LEGACY_DATASET_PATH]) {
+  if (!fs.existsSync(datasetPath)) continue;
   try {
-    const generatedBooks = generateLibraryDataset();
-    BOOKS_COLLECTION = generatedBooks;
-    fs.writeFileSync(STORE_PATH, JSON.stringify(BOOKS_COLLECTION, null, 2), 'utf8');
-    console.log(`Successfully persisted and updated database with ${BOOKS_COLLECTION.length} structured book collection items across all genres.`);
-  } catch (err) {
-    console.error('Failed to pre-generate books store:', err);
-    if (BOOKS_COLLECTION.length === 0) {
-      BOOKS_COLLECTION = [...BOOKS_DATABASE];
+    const source = datasetPath.endsWith('.gz')
+      ? gunzipSync(fs.readFileSync(datasetPath), { maxOutputLength: 512 * 1024 * 1024 }).toString('utf8')
+      : fs.readFileSync(datasetPath, 'utf8');
+    const parsed: unknown = JSON.parse(source);
+    if (!isBookDataset(parsed)) throw new Error('Format dataset bukan daftar buku yang valid.');
+    BOOKS_COLLECTION = parsed;
+    for (let i = 0; i < BOOKS_COLLECTION.length; i++) {
+      const book = BOOKS_COLLECTION[i];
+      book.id = Number(book.id) || i + 1;
+      book.kategori = book.kategori.replace(/^\[['"]?(.+?)['"]?\]$/, '$1').trim();
+      book.genre = book.genre || 'Umum';
+      book.tahun = Number(book.tahun) || 0;
+      book.isbn = String(book.isbn || '');
+      book.halaman = Number(book.halaman) || 0;
+      book.penerbit = String(book.penerbit || 'Tidak diketahui');
+      book.gradient = book.gradient || getRandomGradient(i);
     }
+    console.log(`Loaded ${BOOKS_COLLECTION.length} books from ${path.basename(datasetPath)}`);
+    break;
+  } catch (error) {
+    console.error(`Tidak dapat memuat ${path.basename(datasetPath)}; mencoba dataset berikutnya.`, error);
   }
+}
+
+if (BOOKS_COLLECTION.length === 0) BOOKS_COLLECTION = [...BOOKS_DATABASE];
+
+const startupCleanResult = cleanBookDataset(BOOKS_COLLECTION);
+BOOKS_COLLECTION = startupCleanResult.books;
+if (startupCleanResult.duplicates || startupCleanResult.invalid || startupCleanResult.capped) {
+  const temporaryPath = `${STORE_PATH}.tmp`;
+  fs.writeFileSync(temporaryPath, JSON.stringify(BOOKS_COLLECTION), 'utf8');
+  fs.renameSync(temporaryPath, STORE_PATH);
+  console.log(
+    `Startup catalog cleaned: ${BOOKS_COLLECTION.length} books kept; ` +
+    `${startupCleanResult.duplicates} duplicates and ${startupCleanResult.invalid} invalid records removed.`,
+  );
 }
 
 // Instantiate the TF-IDF Recommendation Engine once at startup
 let recommendationEngine = new TFIDFRecommendationEngine(BOOKS_COLLECTION);
+
+function replaceCatalog(source: Book[]) {
+  const result = cleanBookDataset(source);
+  const nextRecommendationEngine = new TFIDFRecommendationEngine(result.books);
+  const temporaryPath = `${STORE_PATH}.tmp`;
+  fs.writeFileSync(temporaryPath, JSON.stringify(result.books), 'utf8');
+  fs.renameSync(temporaryPath, STORE_PATH);
+
+  BOOKS_COLLECTION = result.books;
+  recommendationEngine = nextRecommendationEngine;
+  invalidateCatalogCache();
+  return result;
+}
 
 function classifyBookGenre(title: string, synopsis: string = ''): { kategori: string; genre: string } {
   const text = `${title} ${synopsis}`.toLowerCase();
@@ -174,7 +412,71 @@ async function startServer() {
 
   // API 2: Books Database List
   app.get('/api/books', (req: Request, res: Response) => {
-    res.json(BOOKS_COLLECTION);
+    const pageSize = Math.min(100, Math.max(1, Number.parseInt(String(req.query.limit || '12'), 10) || 12));
+    const requestedPage = Math.max(1, Number.parseInt(String(req.query.page || '1'), 10) || 1);
+    const search = typeof req.query.search === 'string' ? req.query.search.trim().toLocaleLowerCase() : '';
+    const category = typeof req.query.category === 'string' && req.query.category !== 'Semua'
+      ? req.query.category
+      : '';
+
+    const matches = search || category
+      ? BOOKS_COLLECTION.filter((book) => {
+        if (category && book.kategori !== category) return false;
+        if (!search) return true;
+        return [
+          book.judul,
+          book.penulis,
+          book.penerbit,
+          book.isbn,
+          book.genre || '',
+          book.sinopsis,
+        ].some((value) => value.toLocaleLowerCase().includes(search));
+      })
+      : BOOKS_COLLECTION;
+    const total = matches.length;
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    const page = Math.min(requestedPage, totalPages);
+    const start = (page - 1) * pageSize;
+
+    res.json({
+      books: matches.slice(start, start + pageSize),
+      total,
+      page,
+      pageSize,
+      categoryCounts: getCategoryCounts(),
+    });
+  });
+
+  app.post('/api/books/lookup', (req: Request, res: Response) => {
+    const { ids } = req.body;
+    if (!Array.isArray(ids) || !ids.every((id) => Number.isSafeInteger(id))) {
+      res.status(400).json({ error: 'ids must be an array of integer book IDs.' });
+      return;
+    }
+    const requestedIds = new Set<number>(ids);
+    const books = BOOKS_COLLECTION.filter((book) => requestedIds.has(book.id));
+    res.json({ books, total: books.length });
+  });
+
+  app.post('/api/books/clean', (req: Request, res: Response) => {
+    try {
+      const result = replaceCatalog(BOOKS_COLLECTION);
+      console.log(
+        `Catalog cleaned: ${BOOKS_COLLECTION.length} books kept; ${result.duplicates} duplicates, ` +
+        `${result.invalid} invalid records, ${result.capped} over the ${MAX_CLEAN_BOOKS} limit removed.`,
+      );
+      res.json({
+        success: true,
+        total: BOOKS_COLLECTION.length,
+        maxBooks: MAX_CLEAN_BOOKS,
+        duplicatesRemoved: result.duplicates,
+        invalidRemoved: result.invalid,
+        overLimitRemoved: result.capped,
+      });
+    } catch (error) {
+      console.error('Catalog cleaning failed:', error);
+      res.status(500).json({ error: 'Failed to clean and persist the book catalog.' });
+    }
   });
 
   // API 2.5: Import/Overwrite Books List via JSON upload
@@ -204,16 +506,16 @@ async function startServer() {
         };
       });
 
-      BOOKS_COLLECTION = validatedBooks;
-
-      // Persist to json file
-      fs.writeFileSync(STORE_PATH, JSON.stringify(BOOKS_COLLECTION, null, 2), 'utf8');
-
-      // Reinitialize the Recommendation Engine with the new books
-      recommendationEngine = new TFIDFRecommendationEngine(BOOKS_COLLECTION);
+      const result = replaceCatalog(validatedBooks);
 
       console.log(`Successfully imported ${BOOKS_COLLECTION.length} books and updated NLP engine.`);
-      res.json({ success: true, count: BOOKS_COLLECTION.length, books: BOOKS_COLLECTION });
+      res.json({
+        success: true,
+        count: BOOKS_COLLECTION.length,
+        duplicatesRemoved: result.duplicates,
+        overLimitRemoved: result.capped,
+        books: BOOKS_COLLECTION,
+      });
     } catch (e: any) {
       console.error('Failed to import books:', e);
       res.status(500).json({ error: 'Failed to process and store book dataset on the server.' });
@@ -299,6 +601,7 @@ async function startServer() {
       const startId = clearExisting ? 1 : BOOKS_COLLECTION.length + 1;
 
       for (let i = 1; i < lines.length; i++) {
+        if (importedBooks.length + (clearExisting ? 0 : BOOKS_COLLECTION.length) >= MAX_CLEAN_BOOKS) break;
         const row = parseCSVLine(lines[i]);
         if (row.length === 0 || !row[titleIdx]) continue;
 
@@ -344,13 +647,10 @@ async function startServer() {
       }
 
       if (clearExisting) {
-        BOOKS_COLLECTION = importedBooks;
+        replaceCatalog(importedBooks);
       } else {
-        BOOKS_COLLECTION = [...BOOKS_COLLECTION, ...importedBooks];
+        replaceCatalog([...BOOKS_COLLECTION, ...importedBooks]);
       }
-
-      fs.writeFileSync(STORE_PATH, JSON.stringify(BOOKS_COLLECTION, null, 2), 'utf8');
-      recommendationEngine = new TFIDFRecommendationEngine(BOOKS_COLLECTION);
       syncBooksToCloudSQL(BOOKS_COLLECTION);
 
       console.log(`Successfully imported ${importedBooks.length} new non-duplicate books via CSV. Total catalog count: ${BOOKS_COLLECTION.length}`);
@@ -427,6 +727,7 @@ async function startServer() {
         const newBatch: Book[] = [];
 
         for (let i = startIndex; i < lines.length; i++) {
+          if (BOOKS_COLLECTION.length + newBatch.length >= MAX_CLEAN_BOOKS) break;
           const row = parseCSVLine(lines[i]);
           if (row.length === 0 || !row[titleIdx]) continue;
 
@@ -477,8 +778,7 @@ async function startServer() {
       }
 
       if (isLast) {
-        fs.writeFileSync(STORE_PATH, JSON.stringify(BOOKS_COLLECTION), 'utf8');
-        recommendationEngine = new TFIDFRecommendationEngine(BOOKS_COLLECTION);
+        replaceCatalog(BOOKS_COLLECTION);
         syncBooksToCloudSQL(BOOKS_COLLECTION);
         console.log(`Finished chunked CSV import with deduplication. Total non-duplicate catalog count: ${BOOKS_COLLECTION.length}`);
       }
@@ -498,9 +798,7 @@ async function startServer() {
   app.post('/api/books/reset', (req: Request, res: Response) => {
     try {
       const generatedBooks = generateLibraryDataset();
-      BOOKS_COLLECTION = generatedBooks;
-      fs.writeFileSync(STORE_PATH, JSON.stringify(BOOKS_COLLECTION, null, 2), 'utf8');
-      recommendationEngine = new TFIDFRecommendationEngine(BOOKS_COLLECTION);
+      replaceCatalog(generatedBooks);
       console.log(`Reset dataset to default ${BOOKS_COLLECTION.length} generated books.`);
       res.json({ success: true, count: BOOKS_COLLECTION.length, books: BOOKS_COLLECTION });
     } catch (err) {
