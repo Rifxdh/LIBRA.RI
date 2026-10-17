@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import Markdown from 'react-markdown';
 import { 
   BookOpen, 
@@ -55,13 +55,11 @@ export default function App() {
   const [savedBookIds, setSavedBookIds] = useState<number[]>([]);
   const [bookmarkedBooks, setBookmarkedBooks] = useState<Book[]>([]);
   const [catalogTotal, setCatalogTotal] = useState(0);
-  const [categoryCounts, setCategoryCounts] = useState<Record<string, number>>({});
   
   // UI States
   const [chatStarted, setChatStarted] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [selectedBook, setSelectedBook] = useState<Book | null>(null);
-  const [selectedCategory, setSelectedCategory] = useState<string>('Semua');
   const [isReadingListOpen, setIsReadingListOpen] = useState(false);
   const [importStatus, setImportStatus] = useState<{ success: boolean; message: string } | null>(null);
   const [showClearConfirmModal, setShowClearConfirmModal] = useState<{ open: boolean; cause: 'pdf_downloaded' | 'manual' }>({
@@ -88,7 +86,6 @@ export default function App() {
         page: String(catalogPage),
         limit: String(itemsPerPage),
         search: catalogSearch.trim(),
-        category: selectedCategory,
       });
 
       fetch(`/api/books?${params}`, { signal: controller.signal })
@@ -100,7 +97,6 @@ export default function App() {
           setAllBooks(data.books);
           setCatalogTotal(data.total);
           setCatalogPage(data.page);
-          setCategoryCounts(data.categoryCounts);
         })
         .catch((err) => {
           if (err.name === 'AbortError') return;
@@ -109,17 +105,12 @@ export default function App() {
             const fallbackBooks = mod.BOOKS_DATABASE;
             const normalizedSearch = catalogSearch.trim().toLocaleLowerCase();
             const filteredBooks = fallbackBooks.filter((book) =>
-              (selectedCategory === 'Semua' || book.kategori === selectedCategory) &&
-              (!normalizedSearch || [
+              !normalizedSearch || [
                 book.judul, book.penulis, book.penerbit, book.isbn, book.genre || '', book.sinopsis,
-              ].some((value) => value.toLocaleLowerCase().includes(normalizedSearch)))
+              ].some((value) => value.toLocaleLowerCase().includes(normalizedSearch))
             );
             setAllBooks(filteredBooks.slice((catalogPage - 1) * itemsPerPage, catalogPage * itemsPerPage));
             setCatalogTotal(filteredBooks.length);
-            setCategoryCounts(fallbackBooks.reduce<Record<string, number>>((counts, book) => {
-              counts[book.kategori] = (counts[book.kategori] || 0) + 1;
-              return counts;
-            }, {}));
           });
         });
     }, catalogSearch ? 250 : 0);
@@ -128,7 +119,7 @@ export default function App() {
       window.clearTimeout(searchTimer);
       controller.abort();
     };
-  }, [catalogPage, catalogSearch, catalogRefreshKey, selectedCategory]);
+  }, [catalogPage, catalogSearch, catalogRefreshKey]);
 
   useEffect(() => {
     try {
@@ -309,7 +300,6 @@ export default function App() {
     setRecommendations([]);
     setChatStarted(false);
     setInput('');
-    setSelectedCategory('Semua');
   };
 
   // Sample prompt chips
@@ -332,25 +322,6 @@ export default function App() {
     }
   ];
 
-  // Select top 5-8 popular genres that have > 10 entries (plus 'Semua')
-  const categories = useMemo(() => {
-    let popularCats = Object.entries(categoryCounts)
-      .filter(([_, count]) => count > 10)
-      .sort((a, b) => b[1] - a[1])
-      .map(([cat]) => cat);
-
-    // Fallback if fewer than 5 genres pass > 10 threshold
-    if (popularCats.length < 5) {
-      const fallbackSorted = Object.entries(categoryCounts)
-        .sort((a, b) => b[1] - a[1])
-        .map(([cat]) => cat);
-      popularCats = Array.from(new Set([...popularCats, ...fallbackSorted]));
-    }
-
-    // Limit to top 8 max popular genres
-    return ['Semua', ...popularCats.slice(0, 8)];
-  }, [categoryCounts]);
-  
   const totalCatalogPages = Math.ceil(catalogTotal / itemsPerPage) || 1;
   const currentPaginatedBooks = allBooks;
 
@@ -913,37 +884,6 @@ export default function App() {
                     )}
                   </div>
                   
-                  {/* Category scrollable badging - Top 5-8 Popular Genres (>10 entries) */}
-                  <div className="flex flex-wrap gap-1.5" id="category_scroll_p">
-                    {categories.map((cat) => {
-                      const count = cat === 'Semua' ? Object.values(categoryCounts).reduce((sum, value) => sum + value, 0) : (categoryCounts[cat] || 0);
-                      return (
-                        <button
-                          key={cat}
-                          onClick={() => {
-                            setSelectedCategory(cat);
-                            setCatalogPage(1);
-                          }}
-                          className={`text-[10px] px-2.5 py-1 rounded-lg font-medium transition inline-flex items-center gap-1.5 ${
-                            selectedCategory === cat 
-                              ? 'bg-stone-900 text-white shadow-xs' 
-                              : 'bg-white text-stone-600 hover:text-stone-900 border border-stone-200 shadow-3xs'
-                          }`}
-                        >
-                          <span>{cat}</span>
-                          {count > 0 && (
-                            <span className={`text-[9px] px-1.5 py-0.2 rounded font-mono ${
-                              selectedCategory === cat
-                                ? 'bg-amber-400 text-stone-950 font-bold'
-                                : 'bg-stone-100 text-stone-500'
-                            }`}>
-                              {count > 9999 ? `${(count / 1000).toFixed(0)}k` : count.toLocaleString('id-ID')}
-                            </span>
-                          )}
-                        </button>
-                      );
-                    })}
-                  </div>
                 </div>
 
                 {/* Grid Books list item scroll preview */}
@@ -952,7 +892,7 @@ export default function App() {
                     <div 
                       key={book.id}
                       onClick={() => setSelectedBook(book)}
-                      className="bg-white border border-stone-200 rounded-xl p-4 shadow-3xs hover:shadow-sm hover:border-stone-400 transition-all duration-200 cursor-pointer group flex flex-col justify-between h-[210px]"
+                      className="bg-white border border-stone-200 rounded-xl p-4 shadow-3xs hover:shadow-sm hover:border-stone-400 transition-all duration-200 cursor-pointer group flex flex-col justify-between min-h-[250px]"
                     >
                       <div>
                         {/* Minimalist top accent bar */}
@@ -973,6 +913,10 @@ export default function App() {
                         <p className="text-[11px] text-stone-500 mt-1 line-clamp-1 font-sans">
                           {book.penulis}
                         </p>
+                        <p className="text-[10px] text-stone-600 mt-2 leading-relaxed line-clamp-3">
+                          <span className="font-semibold text-stone-700">Sinopsis: </span>
+                          {book.sinopsis}
+                        </p>
                       </div>
                       <div className="flex items-center justify-between text-[11px] text-stone-400 border-t border-stone-100 pt-2 mt-2 pointer-events-none font-sans">
                         <span className="font-mono text-[10px] line-clamp-1 max-w-[110px]">{book.penerbit}</span>
@@ -987,7 +931,7 @@ export default function App() {
                     <BookOpen className="w-7 h-7 text-stone-300 mx-auto mb-2" />
                     <p className="text-xs text-stone-600 font-medium">Tidak ada buku yang cocok</p>
                     <button 
-                      onClick={() => { setSelectedCategory('Semua'); setCatalogSearch(''); setCatalogPage(1); }}
+                      onClick={() => { setCatalogSearch(''); setCatalogPage(1); }}
                       className="mt-2 text-xs text-amber-700 font-semibold hover:underline"
                     >
                       Reset Filter
@@ -1027,7 +971,7 @@ export default function App() {
                 {catalogTotal === 0 && (
                   <div className="text-center py-10 bg-white border border-dashed border-stone-200 rounded-xl p-4">
                     <BookOpen className="w-8 h-8 text-stone-300 mx-auto mb-2.5" />
-                    <p className="text-xs text-stone-500 font-semibold">Tidak ada buku dalam kategori {selectedCategory}</p>
+                    <p className="text-xs text-stone-500 font-semibold">Tidak ada buku dalam katalog</p>
                   </div>
                 )}
               </div>

@@ -114,12 +114,13 @@ function bookQualityScore(book: Book): number {
     + (book.halaman > 0 ? 1 : 0);
 }
 
-function cleanBookDataset(source: Book[]): { books: Book[]; duplicates: number; invalid: number; capped: number } {
+function cleanBookDataset(source: Book[]): { books: Book[]; duplicates: number; invalid: number; capped: number; invalidCategories: number } {
   const groups: Array<{ book: Book; score: number; keys: Set<string> } | null> = [];
   const keyToGroup = new Map<string, number>();
   const titleToGroups = new Map<string, number[]>();
   let duplicates = 0;
   let invalid = 0;
+  let invalidCategories = 0;
 
   for (const [index, sourceBook] of source.entries()) {
     const judul = cleanBookText(sourceBook.judul);
@@ -141,7 +142,11 @@ function cleanBookDataset(source: Book[]): { books: Book[]; duplicates: number; 
       || ['unknown', 'anonymous', 'anonim', 'tidak diketahui', 'n a', 'na', 'none', 'null'].includes(sourceAuthorIdentity);
     const penulis = authorMissing ? recoverBookAuthor(judul, sourceBook.isbn) : sourceAuthor;
     const normalizedAuthor = normalizeBookIdentity(penulis);
-    const kategori = cleanBookText(sourceBook.kategori).replace(/^\[['"]?(.+?)['"]?\]$/, '$1').trim();
+    let kategori = cleanBookText(sourceBook.kategori).replace(/^\[['"]?(.+?)['"]?\]$/, '$1').trim();
+    if (!kategori || /^\d+$/.test(kategori)) {
+      kategori = classifyBookGenre(judul, sinopsis).kategori;
+      invalidCategories++;
+    }
     const book: Book = {
       id: Number.isSafeInteger(sourceBook.id) && sourceBook.id > 0 ? sourceBook.id : index + 1,
       judul,
@@ -225,7 +230,7 @@ function cleanBookDataset(source: Book[]): { books: Book[]; duplicates: number; 
     }
     usedIds.add(book.id);
   }
-  return { books, duplicates, invalid, capped };
+  return { books, duplicates, invalid, capped, invalidCategories };
 }
 
 // Helper function to sync books collection to Cloud SQL PostgreSQL database
@@ -299,13 +304,14 @@ if (BOOKS_COLLECTION.length === 0) BOOKS_COLLECTION = [...BOOKS_DATABASE];
 
 const startupCleanResult = cleanBookDataset(BOOKS_COLLECTION);
 BOOKS_COLLECTION = startupCleanResult.books;
-if (startupCleanResult.duplicates || startupCleanResult.invalid || startupCleanResult.capped) {
+if (startupCleanResult.duplicates || startupCleanResult.invalid || startupCleanResult.capped || startupCleanResult.invalidCategories) {
   const temporaryPath = `${STORE_PATH}.tmp`;
   fs.writeFileSync(temporaryPath, JSON.stringify(BOOKS_COLLECTION), 'utf8');
   fs.renameSync(temporaryPath, STORE_PATH);
   console.log(
     `Startup catalog cleaned: ${BOOKS_COLLECTION.length} books kept; ` +
-    `${startupCleanResult.duplicates} duplicates and ${startupCleanResult.invalid} invalid records removed.`,
+    `${startupCleanResult.duplicates} duplicates, ${startupCleanResult.invalid} invalid records, and ` +
+    `${startupCleanResult.invalidCategories} invalid categories corrected.`,
   );
 }
 
@@ -472,6 +478,7 @@ async function startServer() {
         duplicatesRemoved: result.duplicates,
         invalidRemoved: result.invalid,
         overLimitRemoved: result.capped,
+        invalidCategoriesCorrected: result.invalidCategories,
       });
     } catch (error) {
       console.error('Catalog cleaning failed:', error);
