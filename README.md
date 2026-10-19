@@ -25,7 +25,16 @@ View your app in AI Studio: https://ai.studio/apps/548efd16-cbda-4c7e-8614-9f996
 2. Add `GEMINI_API_KEY` in the Vercel project environment settings if you want Gemini-powered chat. The local recommendation fallback works without it.
 3. Deploy, then verify `/api/health`.
 
-The catalog JSON is bundled with the API function as read-only seed data. Vercel's function filesystem is ephemeral, so catalog import, reset, and cleanup endpoints return `501` on Vercel; use a persistent database/storage service if live catalog edits are needed. Configure Firebase's authorized domains with the deployed Vercel domain if Firebase sign-in is enabled.
+The catalog JSON is bundled with the API function as seed/fallback data. Vercel's function filesystem is ephemeral, so catalog import, reset, and cleanup endpoints are disabled there. Configure Firebase's authorized domains with the deployed Vercel domain if Firebase sign-in is enabled.
+
+### Connect a persistent Supabase catalog
+
+1. Create a Supabase project, then open **Connect** and copy the **Transaction pooler** PostgreSQL connection string for serverless use.
+2. Set it as `DATABASE_URL` in Vercel's project environment variables. Keep it private; never add the real value to Git or the frontend.
+3. For a local migration, put the same value in ignored `.env.local`, then run `npm run migrate:books`. The script creates the `books` table and indexes, imports the tracked cleaned JSON in a transaction, and verifies the row count. It refuses to overwrite a non-empty `books` table.
+4. Redeploy Vercel. `/api/books` and `/api/books/lookup` use Supabase when `DATABASE_URL` is present; `/api/health` reports database connectivity.
+
+The database migration is one-time and intentionally refuses to overwrite existing catalog rows. The app's catalog write/import endpoints are still disabled on Vercel; the read APIs use the database while the recommendation engine keeps using the bundled catalog snapshot.
 
 ## Catalog Data
 

@@ -10,6 +10,7 @@ import { gunzipSync } from 'zlib';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI } from '@google/genai';
 import dotenv from 'dotenv';
+import { and, asc, count, eq, ilike, inArray, or } from 'drizzle-orm';
 
 // Load local secrets first (the documented .env.local file), then shared .env.
 dotenv.config({ path: ['.env.local', '.env'] });
@@ -18,7 +19,7 @@ import { BOOKS_DATABASE } from './src/data/books.ts';
 import { TFIDFRecommendationEngine } from './src/utils/nlp.ts';
 import { Book } from './src/types.ts';
 import { generateLibraryDataset } from './src/data/generator.ts';
-import { db } from './src/db/index.ts';
+import { db, isDatabaseConfigured } from './src/db/index.ts';
 import { books as booksTable } from './src/db/schema.ts';
 
 // Prefer the writable, cleaned catalog; compressed and legacy files are recovery sources.
@@ -415,19 +416,29 @@ async function createApp() {
   app.use('/api/books', (req: Request, res: Response, next) => {
     const persistentWriteRoutes = ['/clean', '/import', '/import-csv', '/import-csv-chunk', '/reset'];
     if (process.env.VERCEL && req.method === 'POST' && persistentWriteRoutes.includes(req.path)) {
-      res.status(501).json({ error: 'Catalog updates are disabled on Vercel because function storage is ephemeral.' });
+      res.status(501).json({ error: 'Catalog write endpoints are not integrated with the PostgreSQL catalog yet.' });
       return;
     }
     next();
   });
 
   // API 1: Health status
-  app.get('/api/health', (req: Request, res: Response) => {
-    res.json({ status: 'ok', time: new Date().toISOString() });
+  app.get('/api/health', async (req: Request, res: Response) => {
+    if (!isDatabaseConfigured) {
+      res.json({ status: 'ok', database: 'file', time: new Date().toISOString() });
+      return;
+    }
+    try {
+      const [{ value: bookCount }] = await db.select({ value: count() }).from(booksTable);
+      res.json({ status: 'ok', database: 'postgres', books: bookCount, time: new Date().toISOString() });
+    } catch (error) {
+      console.error('Database health check failed:', error);
+      res.status(503).json({ status: 'error', database: 'unavailable' });
+    }
   });
 
   // API 2: Books Database List
-  app.get('/api/books', (req: Request, res: Response) => {
+  app.get('/api/books', async (req: Request, res: Response) => {
     const pageSize = Math.min(100, Math.max(1, Number.parseInt(String(req.query.limit || '12'), 10) || 12));
     const requestedPage = Math.max(1, Number.parseInt(String(req.query.page || '1'), 10) || 1);
     const search = typeof req.query.search === 'string' ? req.query.search.trim().toLocaleLowerCase() : '';
@@ -435,41 +446,88 @@ async function createApp() {
       ? req.query.category
       : '';
 
-    const matches = search || category
-      ? BOOKS_COLLECTION.filter((book) => {
-        if (category && book.kategori !== category) return false;
-        if (!search) return true;
-        return [
-          book.judul,
-          book.penulis,
-          book.penerbit,
-          book.isbn,
-          book.genre || '',
-          book.sinopsis,
-        ].some((value) => value.toLocaleLowerCase().includes(search));
-      })
-      : BOOKS_COLLECTION;
+    if (isDatabaseConfigured) {
+      try {
+        const filters = [];
+        if (category) filters.push(eq(booksTable.kategori, category));
+        if (search) {
+          const pattern = `%${search.replace(/[\\%_]/g, '\\$&')}%`;
+          filters.push(or(
+            ilike(booksTable.judul, pattern),
+            ilike(booksTable.penulis, pattern),
+            ilike(booksTable.penerbit, pattern),
+            ilike(booksTable.isbn, pattern),
+            ilike(booksTable.genre, pattern),
+            ilike(booksTable.sinopsis, pattern),
+          )!);
+        }
+        const where = filters.length ? and(...filters) : undefined;
+        const [{ value: total }] = await db
+          .select({ value: count() })
+          .from(booksTable)
+          .where(where);
+        const totalPages = Math.max(1, Math.ceil(total / pageSize));
+        const page = Math.min(requestedPage, totalPages);
+        const start = (page - 1) * pageSize;
+        const rows = await db
+          .select()
+          .from(booksTable)
+          .where(where)
+          .orderBy(asc(booksTable.id))
+          .limit(pageSize)
+          .offset(start);
+        const categoryRows = await db
+          .select({ category: booksTable.kategori, value: count() })
+          .from(booksTable)
+          .groupBy(booksTable.kategori);
+        res.json({
+          books: rows.map((book) => ({ ...book, genre: book.genre || 'Umum', gradient: book.gradient || 'from-slate-600 to-slate-800' })),
+          total,
+          page,
+          pageSize,
+          categoryCounts: Object.fromEntries(categoryRows.map((row) => [row.category, row.value])),
+        });
+      } catch (error) {
+        console.error('Failed to query the book catalog database:', error);
+        res.status(503).json({ error: 'Catalog database is unavailable.' });
+      }
+      return;
+    }
+
+    const matches = BOOKS_COLLECTION.filter((book) => {
+      if (category && book.kategori !== category) return false;
+      if (!search) return true;
+      return [book.judul, book.penulis, book.penerbit, book.isbn, book.genre || '', book.sinopsis]
+        .some((value) => value.toLocaleLowerCase().includes(search));
+    });
     const total = matches.length;
     const totalPages = Math.max(1, Math.ceil(total / pageSize));
     const page = Math.min(requestedPage, totalPages);
     const start = (page - 1) * pageSize;
-
-    res.json({
-      books: matches.slice(start, start + pageSize),
-      total,
-      page,
-      pageSize,
-      categoryCounts: getCategoryCounts(),
-    });
+    res.json({ books: matches.slice(start, start + pageSize), total, page, pageSize, categoryCounts: getCategoryCounts() });
   });
 
-  app.post('/api/books/lookup', (req: Request, res: Response) => {
+  app.post('/api/books/lookup', async (req: Request, res: Response) => {
     const { ids } = req.body;
     if (!Array.isArray(ids) || !ids.every((id) => Number.isSafeInteger(id))) {
       res.status(400).json({ error: 'ids must be an array of integer book IDs.' });
       return;
     }
+    if (ids.length === 0) {
+      res.json({ books: [], total: 0 });
+      return;
+    }
     const requestedIds = new Set<number>(ids);
+    if (isDatabaseConfigured) {
+      try {
+        const books = await db.select().from(booksTable).where(inArray(booksTable.id, [...requestedIds]));
+        res.json({ books, total: books.length });
+      } catch (error) {
+        console.error('Failed to look up saved books in the database:', error);
+        res.status(503).json({ error: 'Catalog database is unavailable.' });
+      }
+      return;
+    }
     const books = BOOKS_COLLECTION.filter((book) => requestedIds.has(book.id));
     res.json({ books, total: books.length });
   });
